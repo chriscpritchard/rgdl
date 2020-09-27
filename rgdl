@@ -1,0 +1,162 @@
+#!/usr/bin/python
+import configparser
+import argparse
+#import requests
+import json
+import subprocess
+import os
+import requests
+import logging
+import urllib
+import time
+from pathlib import Path
+from xdg.BaseDirectory import xdg_config_dirs
+
+package_name="rgdl"
+site = "https://rapidgator.net"
+api_url = "/api/v2"
+
+username: str = None
+password: str = None
+
+def aria2c_min_max(value):
+  ivalue = int(value)
+  if ivalue <= 0 or ivalue > 16:
+    raise argparse.ArgumentTypeError("Must be between 1 and 16")
+  return ivalue
+
+def get_json(url: str):
+  retry = True
+  count = 0
+  while retry:
+    try:
+      #print("Fetching url: " + url)
+      resp = requests.get(url)
+      cont_type = resp.headers['Content-Type'].lower()
+      if (resp.status_code == 200 and cont_type is not None and cont_type.find('json') > -1):
+        retry = False
+        return resp.text
+      else:
+        time.sleep(2)
+        count += 1
+        if(count == 5):
+          retry = False
+        raise TypeError("Content does not appear to be JSON")
+    except Exception as e:
+      logging.error(e)
+
+def get_file(url: str, dir: str, fn: str=None):
+  #print("Getting file: " + url)
+  try:
+    Path(dir).mkdir(parents=True, exist_ok=True)
+    if fn is None:
+      subprocess.Popen(["aria2c", "-x", "16", "-s", "16", "-d", dir, url]).wait()
+    else:
+      subprocess.Popen(["aria2c", "-x", "16", "-s", "16", "-d", dir, "-o", fn, url]).wait()
+  except FileExistsError as e:
+    logging.error(e)
+    logging.error("Exiting!")
+    raise SystemExit  
+  except ConnectionError as e:
+    logging.error(e)
+
+def get_input_fn_and_dir(fn: str):
+  if (os.path.isdir(fn)):
+    dir = fn
+    file = None
+  else:
+    splitfn = fn.rsplit("/",1)
+    dir = splitfn[0]
+    file = splitfn[1]
+  return {'dir': dir, 'file': file}
+
+def get_rg_login(username: str, password: str):
+  api_login_url = site + api_url + "/user/login" + "?login=" + username + "&password=" + password
+  json_login = json.loads(get_json(api_login_url))
+  if(json_login['status'] == 200):
+    token = json_login['response']['token']
+  else:
+    raise ValueError(json_login['details'])
+  return token
+
+def get_rg_link(url: str, token: str):
+  print("Generating Download URL from API:")
+  try:
+    fileid = urllib.parse.urlparse(url).path.split("/")[2]
+  except IndexError as e:
+    raise ValueError("Input URL not in the right format - it should look like: http(s)://rapidgator.net/file/<id>")
+#  api_login_url = site + api_url + "/user/login" + "?login=" + username + "&password=" + password
+#  json_login = json.loads(get_json(api_login_url))
+#  if(json_login['status'] == 200):
+  if(token is not None):
+    #token = json_login['response']['token']
+    api_dl_url = site + api_url + "/file/download" + "?file_id=" + fileid + "&token=" + token
+    json_dl_url = json.loads(get_json(api_dl_url))
+    if(json_dl_url['status'] == 200):
+      dl_url = json_dl_url['response']['download_url']
+    else:
+      raise ValueError(json_dl_url['details'])
+    print("Download URL Generated: " + dl_url) 
+    return dl_url
+  else:
+    raise ValueError(json_login['details'])
+
+try:
+  parser = argparse.ArgumentParser(description='Download files using the rapidgator API')
+  parser.add_argument('url', metavar='URL', type=str, help="The rapidgator URL to download")
+  parser.add_argument('fn', metavar='OUT', type=str, default='./', nargs='?', help="The output file or directory")
+  parser.add_argument('--extra', '-e', action='append', help="in addition to the first URL, also download this URL", type=str)
+  parser.add_argument('--username', '-u', help="Your rapidgator username", type=str)
+  parser.add_argument('--password', '-p', help="Your rapidgator password", type=str)
+  parser.add_argument('--config', '-c', help="Path to configuration file", type=str)
+  parser.add_argument('--max-connections', '-x', help="Number of connections to use (default: 4)", metavar='[1-16]', default=4, type=aria2c_min_max)
+  args = parser.parse_args()
+
+  config = configparser.ConfigParser()
+  if(args.config):
+    if(os.path.isfile(args.config)):
+      config.read(args.config)
+    else:
+      raise ValueError("Config file does not exist")
+  else:
+    xdg_config_dirs.reverse()
+    for configdir in xdg_config_dirs:
+      cfgfile = configdir + '/' + package_name + '/' + package_name + '.conf'
+      config.read(cfgfile)
+
+  try:
+    if(args.username):
+      username = args.username
+    else:
+      username = config.get('auth', 'username')
+  except configparser.NoSectionError:
+    pass
+  try:
+    if(args.password):
+      password = args.password
+    else:
+      password = config.get('auth', 'password')
+  except configparser.NoSectionError:
+    pass
+    
+  if(username == None):
+    raise ValueError("Username must be specified on the command line, or be in the config file")
+  elif(password == None):
+    raise ValueError("Password must be specified on the command line, or be in the config file")
+
+  rg_token = get_rg_login(username, password)
+  dl_link = get_rg_link(args.url, rg_token)
+  get_fn_args = get_input_fn_and_dir(args.fn)
+  get_file(dl_link, get_fn_args['dir'], get_fn_args['file'])
+  if(args.extra is not None):
+    for dl in args.extra:
+      dl_link_ex = get_rg_link(dl, rg_token)
+      get_file(dl_link_ex, get_fn_args['dir'], get_fn_args['file'])
+
+
+except ValueError as e:
+    logging.error(e)
+    logging.error("Exiting!")
+    raise SystemExit  
+
+
