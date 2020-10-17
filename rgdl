@@ -1,14 +1,14 @@
 #!/usr/bin/python
 import configparser
 import argparse
-#import requests
 import json
-import subprocess
+from os import truncate
 import os
 import requests
 import logging
 import urllib
 import time
+from tqdm import tqdm
 from pathlib import Path
 from xdg.BaseDirectory import xdg_config_dirs
 
@@ -18,12 +18,6 @@ api_url = "/api/v2"
 
 username: str = None
 password: str = None
-
-def aria2c_min_max(value):
-  ivalue = int(value)
-  if ivalue <= 0 or ivalue > 16:
-    raise argparse.ArgumentTypeError("Must be between 1 and 16")
-  return ivalue
 
 def get_json(url: str):
   retry = True
@@ -46,17 +40,30 @@ def get_json(url: str):
       logging.error(e)
 
 def get_file(url: str, dir: str, fn: str=None):
-  #print("Getting file: " + url)
   try:
     Path(dir).mkdir(parents=True, exist_ok=True)
+    fs = None
+    resp = requests.head(url)
     if fn is None:
-      subprocess.Popen(["aria2c", "-x", "16", "-s", "16", "-d", dir, url]).wait()
-    else:
-      subprocess.Popen(["aria2c", "-x", "16", "-s", "16", "-d", dir, "-o", fn, url]).wait()
+      if "Content-Disposition" in resp.headers.keys():
+        fn = resp.headers.get("Content-Disposition").split("filename=")[1].strip("\'\"")
+      else:
+        fn = os.path.basename(urllib.parse.urlparse(url).path)
+    if "Content-Length" in resp.headers.keys():
+      fs = int(resp.headers.get("Content-Length",0))
+    block_size = 4096 #4 Kibibyte
+    progress_bar = tqdm(total=fs, unit="iB", unit_scale=True)
+    resp = requests.get(url, stream=True)
+    with open(fn, 'wb') as file:
+      for data in resp.iter_content(block_size):
+        progress_bar.update(len(data))
+        file.write(data)
+    progress_bar.close()
+    print("Downloaded " + fn + " to " + dir)
   except FileExistsError as e:
     logging.error(e)
     logging.error("Exiting!")
-    raise SystemExit  
+    raise SystemExit
   except ConnectionError as e:
     logging.error(e)
 
@@ -80,36 +87,31 @@ def get_rg_login(username: str, password: str):
   return token
 
 def get_rg_link(url: str, token: str):
-  print("Generating Download URL from API:")
+  print("Generating Download URL from API")
   try:
     fileid = urllib.parse.urlparse(url).path.split("/")[2]
   except IndexError as e:
     raise ValueError("Input URL not in the right format - it should look like: http(s)://rapidgator.net/file/<id>")
-#  api_login_url = site + api_url + "/user/login" + "?login=" + username + "&password=" + password
-#  json_login = json.loads(get_json(api_login_url))
-#  if(json_login['status'] == 200):
   if(token is not None):
-    #token = json_login['response']['token']
     api_dl_url = site + api_url + "/file/download" + "?file_id=" + fileid + "&token=" + token
     json_dl_url = json.loads(get_json(api_dl_url))
     if(json_dl_url['status'] == 200):
       dl_url = json_dl_url['response']['download_url']
     else:
       raise ValueError(json_dl_url['details'])
-    print("Download URL Generated: " + dl_url) 
+    print("Download URL Generated: " + dl_url)
     return dl_url
   else:
-    raise ValueError(json_login['details'])
+    raise ValueError("token does not exist!")
 
 try:
   parser = argparse.ArgumentParser(description='Download files using the rapidgator API')
   parser.add_argument('url', metavar='URL', type=str, help="The rapidgator URL to download")
-  parser.add_argument('fn', metavar='OUT', type=str, default='./', nargs='?', help="The output file or directory")
+  parser.add_argument('fn', metavar='OUT', type=str, default='./', nargs='?', help="The output filename or directory")
   parser.add_argument('--extra', '-e', action='append', help="in addition to the first URL, also download this URL", type=str)
   parser.add_argument('--username', '-u', help="Your rapidgator username", type=str)
   parser.add_argument('--password', '-p', help="Your rapidgator password", type=str)
   parser.add_argument('--config', '-c', help="Path to configuration file", type=str)
-  parser.add_argument('--max-connections', '-x', help="Number of connections to use (default: 4)", metavar='[1-16]', default=4, type=aria2c_min_max)
   args = parser.parse_args()
 
   config = configparser.ConfigParser()
@@ -138,7 +140,7 @@ try:
       password = config.get('auth', 'password')
   except configparser.NoSectionError:
     pass
-    
+
   if(username == None):
     raise ValueError("Username must be specified on the command line, or be in the config file")
   elif(password == None):
@@ -157,6 +159,4 @@ try:
 except ValueError as e:
     logging.error(e)
     logging.error("Exiting!")
-    raise SystemExit  
-
-
+    raise SystemExit
